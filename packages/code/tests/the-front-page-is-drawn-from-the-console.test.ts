@@ -1079,6 +1079,9 @@ describe('the diagrams are outlines of their words, drawn in the brand', () => {
           ? `${ASSETS}/the-family-light.svg`
           : `packages/${dir}/assets/${dir}-light.svg`;
       expect(alt).toBe(ariaOf(diagrams[light] ?? ''));
+      // and the one the README holds, which a hand edit would change without the block the script writes
+      const held = /<img src="[^"]+" alt="([^"]*)"/.exec(read(`packages/${dir}/README.md`))?.[1];
+      expect(held?.replaceAll('&quot;', '"')).toBe(ariaOf(diagrams[light] ?? ''));
       if (dir === FAMILY_PAGE)
         expect(/alt="([^"]*)"/.exec(familyBlock())?.[1]?.replaceAll('&quot;', '"')).toBe(
           ariaOf(diagrams[light] ?? ''),
@@ -1105,7 +1108,8 @@ describe('the diagrams are outlines of their words, drawn in the brand', () => {
 
   it.each(FOURTEEN)('%s uses no colour that is not a value of the palette', (path) => {
     const values = new Set(Object.values(PALETTE));
-    const foreign = coloursIn(diagrams[path] ?? '').filter(
+    // The committed file, not what the script would draw: a colour written by hand is read as one.
+    const foreign = coloursIn(read(path)).filter(
       (c) => c !== 'none' && !values.has(c.toLowerCase()),
     );
     expect(foreign).toEqual([]);
