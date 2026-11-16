@@ -10,7 +10,6 @@
 // here from the path's commands, and `the-front-page-is-drawn-from-the-console.test.ts` refuses a `NaN` in a picture.
 
 import { readFileSync } from 'node:fs';
-import { f } from './field.mjs';
 
 /**
  * The part of `opentype.js` this file uses: the package ships no declarations.
@@ -65,17 +64,50 @@ export const ROLES = Object.freeze({
   tiny: { face: plex[400], variation: undefined, size: 14.3 },
 });
 
+/** One decimal, computed on the absolute coordinate so that no rounding drifts along a path. @param {number} n */
+const tenth = (n) => Math.round(n * 10) / 10;
+
 /**
- * The data of a path from its commands, each number to at most two decimals.
+ * The data of a path from its commands: a move in absolute terms, every other command relative to the point before it,
+ * each number to one decimal. The decimal is taken from the absolute coordinate first and the step is the difference of
+ * two rounded absolutes, so the error of a point never exceeds half a tenth of a unit. A coordinate that is not a
+ * number is written as `NaN` so that the guard sees it.
  * @param {readonly PathCommand[]} commands
  */
-const dataOf = (commands) =>
-  commands
+const dataOf = (commands) => {
+  let px = 0;
+  let py = 0;
+  let sx = 0;
+  let sy = 0;
+  return commands
     .map(({ type, x, y, x1, y1, x2, y2 }) => {
-      const numbers = [x1, y1, x2, y2, x, y].filter((n) => n !== undefined);
-      return type + numbers.map((n) => f(n)).join(' ');
+      if (type === 'Z') {
+        px = sx;
+        py = sy;
+        return 'z';
+      }
+      const pairs = [
+        [x1, y1],
+        [x2, y2],
+        [x, y],
+      ].filter(([a]) => a !== undefined);
+      const numbers = pairs.flatMap(([a, b]) => {
+        const ax = tenth(/** @type {number} */ (a));
+        const ay = tenth(/** @type {number} */ (b));
+        return type === 'M' ? [ax, ay] : [tenth(ax - px), tenth(ay - py)];
+      });
+      const last = pairs[pairs.length - 1];
+      px = tenth(/** @type {number} */ (last?.[0]));
+      py = tenth(/** @type {number} */ (last?.[1]));
+      if (type === 'M') {
+        sx = px;
+        sy = py;
+      }
+      const letter = type === 'M' ? 'M' : type.toLowerCase();
+      return letter + numbers.map(String).join(' ').replaceAll(' -', '-');
     })
     .join('');
+};
 
 /** @typedef {keyof typeof ROLES} Role */
 /** @typedef {'start' | 'middle' | 'end'} Anchor */
