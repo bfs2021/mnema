@@ -4,7 +4,7 @@
 //
 // THE EXPORTS STAY BECAUSE OTHERS READ THEM: the site imports `CELL`, `inkFoot`, `PAGE` and `socialCard` from a checkout of
 // this repository, the extension's icon builder imports `CELL`, `inkFoot` and `PAGE`, and a page of the record copies
-// `PAGE`. This file imports nothing but `node:fs`, `node:url` and `./accent.mjs`, so that import keeps working in a checkout
+// `PAGE`. This file imports statically nothing but `node:fs`, `node:url` and `./accent.mjs`, so that import keeps working in a checkout
 // that has no `node_modules`.
 //
 // THE BANNER IS THE CONSOLE'S WORDMARK. Its rows are read from `THE_BLOCKS`

@@ -193,6 +193,7 @@ const legend = (t, x, y) =>
 
 /**
  * The four steps of "how mnema works": four equal columns of number, title, two lines, the sign on the field and a chip.
+ * Each chip is 250 wide: the widest chip text, `mnema decision record`, is 213 units of IBM Plex Mono at the chip's size.
  * @param {Pen} t
  */
 function works(t) {
@@ -247,7 +248,7 @@ function works(t) {
             say(t, own(h), x, 148, 'step', 'middle', 'ink') +
             say(t, own(a), x, 184, 'prose', 'middle', 'dim') +
             say(t, own(b), x, 204, 'prose', 'middle', 'dim') +
-            chip(t, x, 362, own(c))
+            chip(t, x, 362, own(c), 250)
           );
         })
         .join(''),
