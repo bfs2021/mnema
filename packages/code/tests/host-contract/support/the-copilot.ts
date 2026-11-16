@@ -1,6 +1,7 @@
 /**
  * THE REAL COPILOT CLI, against a stand-in for the model, with the plugin of this tree installed
- * the way a person installs it: `copilot plugin marketplace add <this repository>`, then `copilot
+ * the way a person installs it: `copilot plugin marketplace add` of the repository's address (cloned from a
+ * local stand-in for the `release` branch), then `copilot
  * plugin install mnema@mnema`. Copilot reads the plugin's own manifest
  * (`plugin/.github/plugin/plugin.json`), which names its own hooks file.
  *
@@ -27,16 +28,15 @@ import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from
 import { join } from 'node:path';
 import { afterEach } from 'vitest';
 import { decodedWhole } from '../../support/arriving.js';
-import { GIT_WITHOUT_MAINTENANCE } from '../../support/git-without-maintenance.js';
 import { sizedTo, theDeviceWasTheSizeAskedFor } from '../../support/pty.js';
 import {
   aSandbox,
-  REPO,
   type TheFilesToPut,
   type TheProjectToWrite,
   type TheSandbox,
 } from './a-sandbox.js';
 import { destinationsOrRefuse, refuseUnlessLoopbackOnly } from './the-host.js';
+import { GITHUB, theMarketplaceAsReleased } from './the-marketplace-as-released.js';
 import {
   startAScriptedStandIn,
   startTheStandIn,
@@ -214,7 +214,7 @@ async function aCopilotSession(
     COPILOT_AUTO_UPDATE: 'false',
     COPILOT_ALLOW_ALL: 'true',
     GIT_CONFIG_NOSYSTEM: '1',
-    GIT_CONFIG_GLOBAL: GIT_WITHOUT_MAINTENANCE,
+    GIT_CONFIG_GLOBAL: theMarketplaceAsReleased(box.root),
     ...spec.env,
   };
   // The installation is a person's own commands, and they run with `node` and `mnema` on the PATH
@@ -235,7 +235,7 @@ async function aCopilotSession(
   if (!reported.includes(copilot.version)) {
     throw new Error(`the binary reports ${reported.trim()}, not ${copilot.version}`);
   }
-  copilotSays('plugin', 'marketplace', 'add', REPO);
+  copilotSays('plugin', 'marketplace', 'add', GITHUB);
   copilotSays('plugin', 'install', `${spec.plugin ?? 'mnema'}@mnema`);
   const server = copilotSays('mcp', 'list', '--json');
 
