@@ -166,6 +166,7 @@ import {
   listLinksInRecord,
   listPublicKeyFingerprints,
   listTails,
+  listTailsLeavingLinks,
   type RefusedLine,
   type RelaidLine,
   readTail,
@@ -1321,7 +1322,7 @@ function verifyReading(
   // directory is still there, so its key is not one whose tail is gone.
   const links = listLinksInRecord(layout);
   const linked = new Set(links);
-  const present = linked.has('tails') ? [] : listTails(layout);
+  const present = linked.has('tails') ? [] : listTailsLeavingLinks(layout);
   const tails = present.filter((tail) => !links.some((at) => at.startsWith(`tails/${tail}/`)));
   const keyLinked = (fingerprint: string): boolean =>
     linked.has('keys') || linked.has(`keys/${fingerprint}.pub`);
