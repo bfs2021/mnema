@@ -11,7 +11,8 @@
  * WHY A NOTE OF WHAT WAS CITED, AND WHERE. "Not cited yet" is a fact about the writer's own
  * tail, and reading the whole tail back before every write to learn it is the cost this must
  * not have. So the heads a tail last cited are kept beside the tail's lock, in `locks/`, which
- * the tree's `.gitignore` already keeps out of the record: it is machinery, never proof. Lost,
+ * the tree's `.gitignore` already keeps out of the record (inside a git repository, the `locks/` its
+ * worktrees share under the common git directory): it is machinery, never proof. Lost,
  * the next write cites every head again: one redundant citation per tail, which changes no
  * order, since its event already followed them. Two processes of one installation share the
  * tail and its lock, so they read and write the note in turn.
@@ -51,6 +52,8 @@ export class HeadsToCite {
     private readonly layout: ChainLayout,
     private readonly ownTail: string,
     private readonly upcasters: UpcasterRegistry,
+    /** The layout whose `locks/` holds this tail's note of what it cited: the record's own, unless shared. */
+    private readonly notes: ChainLayout = layout,
   ) {}
 
   /**
@@ -80,7 +83,7 @@ export class HeadsToCite {
   private cited(): Record<string, string> {
     try {
       const parsed: unknown = parseStoredJson(
-        readFileSync(citedHeadsPath(this.layout, this.ownTail), 'utf-8'),
+        readFileSync(citedHeadsPath(this.notes, this.ownTail), 'utf-8'),
       );
       if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {};
       return Object.fromEntries(
@@ -95,7 +98,7 @@ export class HeadsToCite {
 
   /** Replaces the note whole, so a reader never meets half of it. */
   private remember(heads: Record<string, string>): void {
-    const path = citedHeadsPath(this.layout, this.ownTail);
+    const path = citedHeadsPath(this.notes, this.ownTail);
     const staging = `${path}.${process.pid}`;
     try {
       writeFileSync(staging, `${JSON.stringify(heads)}\n`);
