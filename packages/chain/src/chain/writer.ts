@@ -282,6 +282,8 @@ interface TailMark {
   readonly nextSegment: boolean;
   /** Size of `checkpoints.jsonl`, or -1 if absent. */
   readonly checkpointBytes: number;
+  /** Size of the tail's first segment, or -1 if absent: losing the start is a move. */
+  readonly firstBytes: number;
 }
 
 export class ChainWriter {
@@ -327,7 +329,12 @@ export class ChainWriter {
    * It starts as a value no real tail can produce, so the first act always recovers
    * rather than trusting a default that happens to match an empty tail.
    */
-  private mark: TailMark = { segmentBytes: -2, nextSegment: false, checkpointBytes: -2 };
+  private mark: TailMark = {
+    segmentBytes: -2,
+    nextSegment: false,
+    checkpointBytes: -2,
+    firstBytes: -2,
+  };
 
   /**
    * Whether this writer has already made sure its tail is born: see {@link ensureBorn}.
@@ -580,7 +587,7 @@ export class ChainWriter {
     this.record = undefined;
     this.namesRead = undefined;
     this.born = false;
-    this.mark = { segmentBytes: -2, nextSegment: false, checkpointBytes: -2 };
+    this.mark = { segmentBytes: -2, nextSegment: false, checkpointBytes: -2, firstBytes: -2 };
   }
 
   /**
@@ -669,16 +676,6 @@ export class ChainWriter {
   refuseIfDamaged(): void {
     this.underTailLock(() => {
       this.refuseDamagedTail();
-      const startsAt = firstSeqOfTheTail(this.layout, this.tailId, this.upcasters);
-      if (startsAt !== undefined && startsAt !== 0) {
-        throw new TailDamagedError(
-          this.tailId,
-          this.lastCheckpointedSeq,
-          this.nextSeq - 1,
-          undefined,
-          startsAt,
-        );
-      }
     });
   }
 
@@ -696,6 +693,7 @@ export class ChainWriter {
       segmentBytes: sizeOf(segmentPath(this.layout, this.tailId, this.segment)),
       nextSegment: sizeOf(segmentPath(this.layout, this.tailId, this.segment + 1)) >= 0,
       checkpointBytes: sizeOf(checkpointsPath(this.layout, this.tailId)),
+      firstBytes: sizeOf(segmentPath(this.layout, this.tailId, 1)),
     };
   }
 
@@ -789,7 +787,9 @@ export class ChainWriter {
    *      deletes, leaving the next append chained to a hash no reader can find.
    *      One read of the END of the tail then answers the remaining questions:
    *      the last complete entry is the head, and the entries above the coverage
-   *      are the events the next checkpoint owes a signature.
+   *      are the events the next checkpoint owes a signature. The same read says whether
+   *      the tail BEGINS at seq 0 ({@link damageInTheFiles}): one that does not is refused
+   *      like a cut end, whatever the anchor says.
    *   3. THE CUT, ONLY ABOVE THE COVERAGE. THIS USED TO HEAL FIRST, before the
    *      checkpoint was read, and so cut whatever the end held: a signed line
    *      truncated by an edit, or one that had only lost its newline, went with
@@ -813,29 +813,18 @@ export class ChainWriter {
     const lastCp = lastTailCheckpoint(this.layout, this.tailId);
     this.lastCheckpointedSeq = lastCp?.toSeq ?? -1;
     this.lastCheckpointHash = lastCp === undefined ? null : checkpointHash(lastCp);
-    const segments = orderedSegments(this.layout, this.tailId);
-    const lastSegment = segments.at(-1);
-    let fragment: TornFragment | undefined;
+    const end = readEndOfTheTail(this.layout, this.tailId, this.upcasters, lastCp);
+    const { lastSegment, fragment, walked, tip, lastComplete } = end;
     if (lastSegment !== undefined) {
       const match = /(\d+)\.jsonl$/.exec(lastSegment);
       this.segment = match ? Number.parseInt(match[1] as string, 10) : 1;
-      fragment = tornFragment(lastSegment, this.upcasters);
       this.segmentBytes = fragment?.start ?? Math.max(sizeOf(lastSegment), 0);
     }
-    // A fragment that parses is the walk's first entry and not a line the tail holds, so the
-    // walk goes one entry further down to still reach the coverage without it.
-    const walked = readTailTip(
-      this.layout,
-      this.tailId,
-      this.upcasters,
-      this.lastCheckpointedSeq - (fragment?.parses ? 1 : 0),
-    );
-    const tip = fragment?.parses ? walked.slice(0, -1) : walked;
-    const lastComplete = tip.at(-1)?.link.seq ?? -1;
-    if (lastCp !== undefined && lastComplete < lastCp.toSeq) {
+    const damaged = damageInTheFiles(this.layout, this.tailId, this.upcasters, lastCp, end);
+    if (damaged !== undefined) {
       // Nothing is cut, nothing is owed a signature, and both append doors refuse.
-      this.damage = new TailDamagedError(this.tailId, lastCp.toSeq, lastComplete);
-      this.nextSeq = lastCp.toSeq + 1;
+      this.damage = damaged;
+      this.nextSeq = damaged.signedThrough + 1;
       this.pending = [];
       return;
     }
@@ -1232,11 +1221,15 @@ export class ChainWriter {
     return (
       now.segmentBytes === this.mark.segmentBytes &&
       now.nextSegment === this.mark.nextSegment &&
-      now.checkpointBytes === this.mark.checkpointBytes
+      now.checkpointBytes === this.mark.checkpointBytes &&
+      now.firstBytes === this.mark.firstBytes
     );
   }
 
   private signLocked(): Checkpoint | null {
+    // A tail with no beginning is signed over by nobody: what is above its coverage is not a range
+    // a checkpoint may claim. (A cut end signs nothing already, as nextSeq stops at the coverage.)
+    if (this.damage?.startsAt !== undefined) throw this.damage;
     const fromSeq = this.lastCheckpointedSeq + 1;
     const toSeq = this.nextSeq - 1;
     if (toSeq < fromSeq) return null;
@@ -1376,26 +1369,58 @@ function tailDamage(
 }
 
 /**
- * The seq of the first line of a tail's first segment, or undefined where there is none to read
- * (no segment, an empty one, a first line that does not parse or that is longer than the read,
- * or a segment that vanished between the listing and the open: other refusals say those). Read
- * from the file, bounded to its first line.
+ * The seq of the first line the tail holds, or undefined where there is none to read (no segment,
+ * every segment empty or unfinished, a first line that does not parse or that is longer than
+ * {@link FIRST_LINE_LIMIT}, or a segment that vanished between the listing and the open: other
+ * refusals say those). A first segment that is empty or whose first line was never finished,
+ * with segments after it, is a start that is gone, so the walk goes on to the first line of the
+ * next one and the seq it begins at says so. Each file is read in small pieces up to its first
+ * newline, never past the limit.
  */
 function firstSeqOfTheTail(
   layout: ChainLayout,
   tailId: string,
   upcasters: UpcasterRegistry,
 ): number | undefined {
-  const first = orderedSegments(layout, tailId)[0];
-  if (first === undefined) return undefined;
+  for (const segment of orderedSegments(layout, tailId)) {
+    const line = firstLineOf(segment);
+    if (line === 'unfinished') continue;
+    if (line === undefined) return undefined;
+    try {
+      return parseEntry(line, upcasters).link.seq;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+/** The most of a first line that is read: a longer one is no entry. */
+const FIRST_LINE_LIMIT = 1 << 20;
+
+/**
+ * The first line of a file, `'unfinished'` for a file that is empty or ends before a newline, and
+ * undefined for one that cannot be read or whose first line passes {@link FIRST_LINE_LIMIT}.
+ */
+function firstLineOf(file: string): string | undefined | 'unfinished' {
   let fd: number | undefined;
   try {
-    fd = openSync(first, 'r');
-    const buffer = Buffer.alloc(1 << 20);
-    const read = readSync(fd, buffer, 0, buffer.length, 0);
-    const end = buffer.subarray(0, read).indexOf(0x0a);
-    if (end < 0) return undefined;
-    return parseEntry(buffer.subarray(0, end).toString('utf-8'), upcasters).link.seq;
+    fd = openSync(file, 'r');
+    const chunk = Buffer.alloc(8192);
+    const parts: Buffer[] = [];
+    let at = 0;
+    while (at < FIRST_LINE_LIMIT) {
+      const read = readSync(fd, chunk, 0, chunk.length, at);
+      if (read === 0) return 'unfinished';
+      const newline = chunk.subarray(0, read).indexOf(0x0a);
+      if (newline >= 0) {
+        parts.push(Buffer.from(chunk.subarray(0, newline)));
+        return Buffer.concat(parts).toString('utf-8');
+      }
+      parts.push(Buffer.from(chunk.subarray(0, read)));
+      at += read;
+    }
+    return undefined;
   } catch {
     return undefined;
   } finally {
@@ -1410,10 +1435,12 @@ function firstSeqOfTheTail(
  * there is no damage to name: no installation id kept, a tail that is not there at all, or one
  * whose files end where its checkpoints say and begin at seq 0.
  *
- * It names what a writer's own reading names first (the end of the tail short of what its last
- * checkpoint signed, and a start above seq 0), and not what that reading names from a signed
- * note of this key's last write (checkpoints taken out or replaced under a whole end): that one
- * needs the key's note and the writer's resync.
+ * It is the same rule the writer's recovery applies ({@link damageInTheFiles}): the end of the
+ * tail short of what its last checkpoint signed, and a start above seq 0. It does not name what
+ * the writer names from a signed note of this key's last write (checkpoints taken out or replaced
+ * under a whole end): that one needs the key's note. For a tree that holds no installation id of
+ * this key it returns undefined silently; only the public `init` asks it today. A first line it
+ * cannot parse is the readers' to refuse and throws from here as it does from them.
  */
 export function readTailDamage(
   layout: ChainLayout,
@@ -1430,14 +1457,59 @@ export function readTailDamage(
   const tailId = `${fingerprint}-${installationId}`;
   if (!existsSync(tailDir(layout, tailId))) return undefined;
   const lastCp = lastTailCheckpoint(layout, tailId);
-  const lastComplete =
-    readTailTip(layout, tailId, upcasters, lastCp?.toSeq ?? -1).at(-1)?.link.seq ?? -1;
-  if (lastCp !== undefined && lastComplete < lastCp.toSeq) {
-    return new TailDamagedError(tailId, lastCp.toSeq, lastComplete);
+  const end = readEndOfTheTail(layout, tailId, upcasters, lastCp);
+  return damageInTheFiles(layout, tailId, upcasters, lastCp, end);
+}
+
+/** What the end of a tail holds: the segment it ends in, the torn piece, and the entries read. */
+interface EndOfTheTail {
+  readonly lastSegment: string | undefined;
+  readonly fragment: TornFragment | undefined;
+  /** The walk from the end down to the coverage, a fragment that parses included. */
+  readonly walked: ChainEntry[];
+  /** `walked` without a fragment that parses: the lines the tail holds. */
+  readonly tip: ChainEntry[];
+  readonly lastComplete: number;
+}
+
+/** Reads the end of a tail from its files; the writer's recovery and the read-only ask both use it. */
+function readEndOfTheTail(
+  layout: ChainLayout,
+  tailId: string,
+  upcasters: UpcasterRegistry,
+  lastCp: Checkpoint | undefined,
+): EndOfTheTail {
+  const lastSegment = orderedSegments(layout, tailId).at(-1);
+  const fragment = lastSegment === undefined ? undefined : tornFragment(lastSegment, upcasters);
+  const coverage = lastCp?.toSeq ?? -1;
+  // A fragment that parses is the walk's first entry and not a line the tail holds, so the
+  // walk goes one entry further down to still reach the coverage without it.
+  const walked = readTailTip(layout, tailId, upcasters, coverage - (fragment?.parses ? 1 : 0));
+  const tip = fragment?.parses ? walked.slice(0, -1) : walked;
+  return { lastSegment, fragment, walked, tip, lastComplete: tip.at(-1)?.link.seq ?? -1 };
+}
+
+/**
+ * THE ONE RULE FOR WHAT THE FILES OF A TAIL SHOW AS DAMAGE, asked by the writer's recovery
+ * (under the lock, after its resync) and by {@link readTailDamage} (from the disk alone): a last
+ * complete line below what the last checkpoint signed, or a first segment that does not begin at
+ * seq 0 (`tail prune` removes a tail whole and never a segment). The only damage it does not
+ * name is the one that needs this key's signed note: checkpoints taken out or replaced under a
+ * whole end, which `recover()` alone names.
+ */
+function damageInTheFiles(
+  layout: ChainLayout,
+  tailId: string,
+  upcasters: UpcasterRegistry,
+  lastCp: Checkpoint | undefined,
+  end: EndOfTheTail,
+): TailDamagedError | undefined {
+  if (lastCp !== undefined && end.lastComplete < lastCp.toSeq) {
+    return new TailDamagedError(tailId, lastCp.toSeq, end.lastComplete);
   }
   const startsAt = firstSeqOfTheTail(layout, tailId, upcasters);
   if (startsAt !== undefined && startsAt !== 0) {
-    return new TailDamagedError(tailId, lastCp?.toSeq ?? -1, lastComplete, undefined, startsAt);
+    return new TailDamagedError(tailId, lastCp?.toSeq ?? -1, end.lastComplete, undefined, startsAt);
   }
   return undefined;
 }
