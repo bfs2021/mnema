@@ -66,12 +66,12 @@ import {
   readSync,
   statSync,
   truncateSync,
-  writeFileSync,
 } from 'node:fs';
 import { dirname } from 'node:path';
 
 import type { CatalogEvent } from '../events/catalog.js';
 import { EventParseError, unreadableReason } from '../events/parse.js';
+import { isJsonText } from '../events/stored-json.js';
 import type { UpcasterRegistry } from '../events/upcaster.js';
 import {
   type Checkpoint,
@@ -82,7 +82,7 @@ import {
 } from './checkpoint.js';
 import { type Cited, HeadsToCite } from './cited-heads.js';
 import { CodedError } from './coded-error.js';
-import { appendDurably } from './durable.js';
+import { appendDurably, writeFileDurably } from './durable.js';
 import {
   type ChainEntry,
   type Entry,
@@ -113,6 +113,7 @@ import {
 } from './layout.js';
 import { linesFromEnd, parseStoredLine } from './lines.js';
 import { recordToWriteUnder, type WriteUnder } from './record-name.js';
+import { clearOrphanedStaging } from './staging.js';
 import { lastTailCheckpoint, orderedSegments, readTailTip } from './store.js';
 import { withTailLock } from './tail-lock.js';
 import { firstEntries, type NamesRelinked, namesRelinkedAt } from './tail-names.js';
@@ -460,6 +461,7 @@ export class ChainWriter {
     this.keepBeforeBirth?.();
     materializePublicKey(this.layout, this.keyPair);
     mkdirSync(tailDir(this.layout, this.tailId), { recursive: true });
+    clearOrphanedStaging(this.layout, this.tailId);
     this.ensureTailProof();
     this.born = true;
   }
@@ -701,13 +703,15 @@ export class ChainWriter {
    * Writes this tail's proof of ownership once, at birth: the key signs a
    * statement naming its own tail id, so the verifier can tie the locally-chosen
    * installation-id suffix to the key that owns it. Idempotent (a reopened tail
-   * already has one) and never overwrites, so it costs nothing after birth.
+   * already has one) and never overwrites a proof that reads, whoever's it is (ADR-354). A proof
+   * that is empty or does not parse is what a power cut at birth leaves: no reader can use it and
+   * nothing else would ever replace it, so it is written again, to the disk, like the birth.
    */
   private ensureTailProof(): void {
     const path = tailProofPath(this.layout, this.tailId);
-    if (existsSync(path)) return;
+    if (existsSync(path) && !unreadableProof(path)) return;
     const proof = signTailProof(this.tailId, this.keyPair, this.recordName());
-    writeFileSync(path, `${serializeTailProof(proof)}\n`, 'utf-8');
+    writeFileDurably(path, `${serializeTailProof(proof)}\n`);
   }
 
   /**
@@ -1586,6 +1590,21 @@ function refuseUnreadable(event: CatalogEvent): void {
   throw new EventParseError(
     `refusing to seal an event no reader could accept: ${reason}. This write was not appended.`,
   );
+}
+
+/**
+ * Whether the proof file at `path` is empty or is not JSON at all, which is what a cut leaves. A
+ * file that cannot be read is left to whoever reads it, and one that is JSON is left whole, whoever's
+ * it is and however it is spelled: a reformatted proof is for the readers to name (ADR-354).
+ */
+function unreadableProof(path: string): boolean {
+  let text: string;
+  try {
+    text = readFileSync(path, 'utf-8');
+  } catch {
+    return false;
+  }
+  return text.trim() === '' || !isJsonText(text);
 }
 
 /**
