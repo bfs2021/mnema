@@ -258,6 +258,7 @@ export {
 export {
   type AgentSigning,
   type AgentStanding,
+  type Ask,
   type Assigned,
   agentKeyRoot,
   agentRetiredIn,
@@ -274,6 +275,7 @@ export {
   type Copied,
   type CopyStanding,
   chainRootForScope,
+  type DefaultBranch,
   type Discovery,
   type DiscoveryEnv,
   destinationOf,
@@ -318,6 +320,7 @@ export {
   standingOfCopy,
   TreeUnavailableError,
   tailsHeld,
+  theDefaultBranch,
   treesSearched,
   treeWords,
   whyNoProjectRootAt,

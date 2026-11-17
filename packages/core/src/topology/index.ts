@@ -42,6 +42,7 @@ export {
   standingOfCopy,
   writeCopy,
 } from './backup/copy.js';
+export { type Ask, type DefaultBranch, theDefaultBranch } from './default-branch.js';
 export { gitPlaceOf } from './git-place.js';
 export {
   type BirthProbe,

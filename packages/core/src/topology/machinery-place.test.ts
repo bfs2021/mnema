@@ -53,9 +53,10 @@ describe('the roots a public writer is opened over', () => {
   it('are the shared place and this worktree’s own, in a repository, and nothing outside one', () => {
     aGitDir(join(real, 'repo', '.git'));
     const roots = machineryRootsOf(treesAt(join(real, 'repo')));
-    expect(roots).toEqual({
+    expect(roots).toMatchObject({
       sharedRoot: join(real, 'repo', '.git', 'mnema', '%2E', 'public'),
       installationRoot: join(real, 'repo', '.git', 'mnema', '%2E', 'public'),
+      pool: { checkoutRoot: join(real, 'repo', '.git', 'mnema', '%2E', 'public') },
     });
     mkdirSync(join(real, 'plain'));
     expect(machineryRootsOf(treesAt(join(real, 'plain')))).toBeUndefined();
@@ -66,6 +67,26 @@ describe('the roots a public writer is opened over', () => {
     machineryRootsOf(treesAt(join(real, 'repo')));
     expect(() => readdirOf(git)).not.toThrow();
     expect(readdirOf(git)).toEqual(['HEAD']);
+  });
+});
+
+describe('the pool a public writer is given', () => {
+  it('reserves the installation ids that the other worktrees keep as their hint, and only for the key asked', () => {
+    const common = aGitDir(join(real, 'repo', '.git'));
+    const other = aGitDir(join(common, 'worktrees', 'other'));
+    writeFileSync(join(other, 'commondir'), '../..\n');
+    mkdirSync(join(real, 'other'));
+    writeFileSync(join(real, 'other', '.git'), `gitdir: ${other}\n`);
+    writeFileSync(join(other, 'gitdir'), `${join(real, 'other', '.git')}\n`);
+    const keys = join(other, 'mnema', '%2E', 'public', 'keys');
+    mkdirSync(keys, { recursive: true });
+    writeFileSync(join(keys, `${'f'.repeat(64)}.inst`), 'an-installation\n');
+    writeFileSync(join(keys, `${'e'.repeat(64)}.inst`), '\n');
+
+    const roots = machineryRootsOf(treesAt(join(real, 'repo')));
+    expect([...(roots?.pool.reservedBy('f'.repeat(64)) ?? [])]).toEqual(['an-installation']);
+    expect([...(roots?.pool.reservedBy('e'.repeat(64)) ?? [])]).toEqual([]);
+    expect([...(roots?.pool.reservedBy('d'.repeat(64)) ?? [])]).toEqual([]);
   });
 });
 
