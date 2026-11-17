@@ -241,9 +241,29 @@ export function buildProgram(
   // was just registered, so a verb added to the list above arrives covered.
   speakUsageErrors(program, { io, render: resolved }, typed);
 
+  refuseAWriteOverAnAlteredEntry(program, verbs);
   sayWhatAWriteFounded(program, io, resolved, verbs);
 
   return { program, render: resolved, io, verbs };
+}
+
+/**
+ * Before a verb runs: the door that refuses a write while an entry of the record is altered (ADR-396)
+ * is armed for it, or cleared. It refuses at the writer, with the refusal `AlteredEntryError` names,
+ * which the catch of {@link parseWith} says as it says every refusal the product wrote on purpose.
+ * Registered first, so it is armed before anything the other hooks do. Which invocations, and why the
+ * door stands at the writer, is `a-write-over-an-altered-entry.ts`.
+ */
+function refuseAWriteOverAnAlteredEntry(program: Command, verbs: readonly Declared[]): void {
+  program.hook('preAction', async (_program, action) => {
+    const { armsTheDoor, armTheDoor, asksAtOnce } = await import(
+      './a-write-over-an-altered-entry.js'
+    );
+    await armTheDoor(
+      armsTheDoor(verbs, action),
+      asksAtOnce(action) ? resolveTrees(here().cwd, here().env) : undefined,
+    );
+  });
 }
 
 /**
