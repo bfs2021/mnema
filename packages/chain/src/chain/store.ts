@@ -7,8 +7,8 @@
  * layers the T1/T2/T4 checks on top of what this returns.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename } from 'node:path';
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import { decodeStoredBytes, StoredJsonError } from '../events/stored-json.js';
 import type { UpcasterRegistry } from '../events/upcaster.js';
@@ -52,30 +52,120 @@ const NEWLINE = 0x0a;
  *
  * A symbolic link under `tails/` is not one, whatever it points at: `readdirSync` reports the
  * entry itself, never its target, so a link is no directory here. No reading and no writer
- * follows it, and the verifier refuses it by name ({@link listLinkedTails}, FORMAT.md section 4).
+ * follows it, and the verifier refuses it by name ({@link listLinksInRecord}, FORMAT.md section 4).
  */
 export function listTails(layout: ChainLayout): string[] {
   const dir = tailsDir(layout);
   if (!existsSync(dir)) return [];
+  return listedEntries(dir)
+    .filter((e) => e.directory)
+    .map((e) => e.name);
+}
+
+/** What a directory listing says one entry is, nothing at it opened or followed. */
+export interface ListedEntry {
+  readonly name: string;
+  readonly link: boolean;
+  readonly directory: boolean;
+  readonly file: boolean;
+}
+
+/** What `lstat` says of a path, as far as {@link listedEntries} asks it. */
+export type LinkCheck = (path: string) => {
+  isSymbolicLink(): boolean;
+  isDirectory(): boolean;
+  isFile(): boolean;
+};
+
+/**
+ * Where the listing has to be confirmed: on Windows only. A Windows listing (libuv's
+ * `fs__scandir`) types EVERY reparse point as a link, a cloud placeholder (OneDrive) or a
+ * deduplicated file included, while libuv's `lstat` (`fs__stat_handle`, `fs__readlink_handle`) calls
+ * a link only a symbolic link, a junction to a drive path and an app execution alias, and reads
+ * any other reparse point as the file or folder it is, as `readFileSync` opens it. Elsewhere the
+ * listing's type is the `lstat` type, and nothing more is asked.
+ */
+const CONFIRMED_ON_THIS_SYSTEM: LinkCheck | undefined =
+  typeof process !== 'undefined' && process.platform === 'win32' ? lstatSync : undefined;
+
+/**
+ * THE ENTRIES OF A DIRECTORY, by what each is, in name order (UTF-16), for every reader of a record
+ * that types what it lists: the tails ({@link listTails}), a tail's entries
+ * ({@link classifyTailDirectory}) and the links refused ({@link listLinksInRecord}). An entry the
+ * listing calls a link is one only when `check` (Windows' `lstat`, see above) agrees; one it does
+ * not is what `check` says it is, so a placeholder folder is a tail like any other and not one
+ * that is neither a link nor a tail. The second reader asks the same of its listing (`_listing`).
+ */
+export function listedEntries(
+  dir: string,
+  check: LinkCheck | undefined = CONFIRMED_ON_THIS_SYSTEM,
+): ListedEntry[] {
   return readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isDirectory())
-    .map((e) => e.name)
-    .sort();
+    .map((entry): ListedEntry => {
+      const said = {
+        name: entry.name,
+        link: entry.isSymbolicLink(),
+        directory: entry.isDirectory(),
+        file: entry.isFile(),
+      };
+      if (!said.link || check === undefined) return said;
+      let held: ReturnType<LinkCheck>;
+      try {
+        held = check(join(dir, entry.name));
+      } catch {
+        return said;
+      }
+      if (held.isSymbolicLink()) return said;
+      return { name: entry.name, link: false, directory: held.isDirectory(), file: held.isFile() };
+    })
+    .sort((a, b) => compareUtf16(a.name, b.name));
 }
 
 /**
- * The names under `tails/` that are symbolic links (FORMAT.md section 4): what {@link listTails}
- * leaves out and the verifier refuses by name, so a link is never read by one reader and
- * skipped in silence by the other (`tail-linked-beside-a-real-one`,
- * `both-readers-read-the-same-bytes.test.ts`).
+ * EVERY SYMBOLIC LINK AT A PLACE A READER READS IN A RECORD (FORMAT.md section 4, ADR-348), by its
+ * path in the record: `keys` and `tails` themselves, each entry of either, each entry of each tail
+ * directory, and each entry of a tail's `witness/`. Nothing below a link is listed, and no link is
+ * followed: each entry is judged by the directory listing (`lstat`, never `stat`), which on Windows
+ * takes a symbolic link, a junction and an app execution alias for a link and any other reparse
+ * point (a cloud placeholder) for what it holds ({@link listedEntries}). The second reader asks the
+ * same of the same listing.
+ *
+ * The verdict asks this BEFORE it reads anything, and reads nothing a link stands for: a tail with a
+ * link in it is not read, a key file that is one is not read, and neither is anything under `keys/`
+ * or `tails/` when that directory is one. The root and the directories above it are not judged
+ * (the path is the caller's), and neither is anything a reader does not read (a stray folder of a
+ * tail, `locks/`). The second reader walks the same places in the same order (`record_links`).
  */
-export function listLinkedTails(layout: ChainLayout): string[] {
-  const dir = tailsDir(layout);
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true })
-    .filter((e) => e.isSymbolicLink())
-    .map((e) => e.name)
-    .sort();
+export function listLinksInRecord(layout: ChainLayout): string[] {
+  const links: string[] = [];
+  if (!existsSync(layout.root)) return links;
+  const top = listedEntries(layout.root);
+  for (const dir of ['keys', 'tails']) {
+    const entry = top.find((one) => one.name === dir);
+    if (entry === undefined) continue;
+    if (entry.link) {
+      links.push(dir);
+      continue;
+    }
+    if (!entry.directory) continue;
+    for (const held of listedEntries(join(layout.root, dir))) {
+      const path = `${dir}/${held.name}`;
+      if (held.link) links.push(path);
+      else if (dir === 'tails' && held.directory) linksInTail(layout, held.name, links);
+    }
+  }
+  return links;
+}
+
+function linksInTail(layout: ChainLayout, tail: string, links: string[]): void {
+  for (const held of listedEntries(tailDir(layout, tail))) {
+    if (held.link) links.push(`tails/${tail}/${held.name}`);
+    else if (held.name === 'witness' && held.directory) {
+      for (const attested of listedEntries(join(tailDir(layout, tail), 'witness'))) {
+        if (attested.link) links.push(`tails/${tail}/witness/${attested.name}`);
+      }
+    }
+  }
 }
 
 /**
@@ -101,26 +191,22 @@ export function classifyTailDirectory(
   layout: ChainLayout,
   tailId: string,
 ): { readonly name: string; readonly kind: TailEntryKind }[] {
-  return readdirSync(tailDir(layout, tailId), { withFileTypes: true })
-    .map((entry) => ({ name: entry.name, kind: classifyTailEntry(entry) }))
-    .sort((a, b) => compareUtf16(a.name, b.name));
+  return listedEntries(tailDir(layout, tailId)).map((entry) => ({
+    name: entry.name,
+    kind: classifyTailEntry(entry),
+  }));
 }
 
-function classifyTailEntry(entry: {
-  readonly name: string;
-  isSymbolicLink(): boolean;
-  isFile(): boolean;
-  isDirectory(): boolean;
-}): TailEntryKind {
+function classifyTailEntry(entry: ListedEntry): TailEntryKind {
   const { name } = entry;
   if (name === '.DS_Store' || name.startsWith(APPLE_DOUBLE_PREFIX)) return 'os';
-  if (entry.isSymbolicLink()) return 'link';
-  if (entry.isFile()) {
+  if (entry.link) return 'link';
+  if (entry.file) {
     if (isSegmentFile(name)) return 'segment';
     if (name === 'checkpoints.jsonl') return 'checkpoints';
     if (name === 'tailproof.json') return 'tailproof';
   }
-  if (entry.isDirectory() && name === 'witness') return 'witness';
+  if (entry.directory && name === 'witness') return 'witness';
   return 'stray';
 }
 
