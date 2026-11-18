@@ -3,7 +3,7 @@
  *
  * Five acts on a project's backup in a folder: `setup` says which folder keeps it, `run` copies
  * the trees into it, `status` says how far the copy is from them, `verify` reads the copy as a record
- * and sets it against the trees, and `restore` puts a copy back without overwriting anything. None of
+ * and sets it against the trees, and `restore` puts a copy back without overwriting anything (a copy of another record only after a person says yes at a terminal). None of
  * them records anything: the verb reads the record and writes a folder (or a tree that lost files),
  * so it is declared as a read.
  *
@@ -61,7 +61,8 @@ export function registerBackup(program: Command, wiring: Wiring): Declared {
         'symbolic link in the tree or in the folder. A copy only grows. The folder keeps the text in',
         'clear, which `setup` asks a person to confirm at a terminal. A machine can have a folder per project; a project has the one it was set up with.',
         "`verify` reads the copy as a record (with this mnema's reader) and says how it stands against the trees; `restore` puts it",
-        'back into a tree that lost files, and never over a file the tree holds.',
+        'back into a tree that lost files, and never over a file the tree holds; a copy of another record is asked first,',
+        'what the tree held is kept aside in the git directory, and `restore --undo` puts it back.',
         "The machine's global tree, which mixes the memory of every project, is never part of a project's",
         'backup: `--global` copies it, and only it, into the folder `setup --global` gave it, as',
         '<folder>/global/.',
@@ -361,11 +362,87 @@ export function registerBackup(program: Command, wiring: Wiring): Declared {
 
   backup
     .command('restore')
-    .description('put a copy back into the trees that lost files, never over a file the tree holds')
+    .description(
+      'put a copy back into the trees that lost files, never over a file the tree holds; a copy of another record is asked first, and --undo puts back what it replaced',
+    )
     .option('--dry-run', 'say what would be put back, and put nothing')
-    .action(async (opts: { dryRun?: boolean }) => {
-      const { runBackupRestore } = await import('../commands/backup.js');
-      const result = runBackupRestore(here(), opts.dryRun === true);
+    .option(
+      '--from <record>',
+      "take the copy of this record (64 hex) from the project's folder, instead of the project's own",
+    )
+    .option('--undo', 'put back what the last restore of another record kept aside')
+    .action(async (opts: { dryRun?: boolean; from?: string; undo?: boolean }) => {
+      const { planBackupRestore, runBackupRestore, runBackupUndo } = await import(
+        '../commands/backup.js'
+      );
+      if (opts.undo === true) {
+        if (opts.dryRun === true || opts.from !== undefined) {
+          reportRefusal(wiring, {
+            reason: 'USAGE',
+            message: '--undo takes no other option: it puts back what the last restore kept aside.',
+          });
+          return;
+        }
+        const undone = runBackupUndo(here());
+        if (!undone.ok) {
+          reportRefusal(wiring, undone, REFUSALS);
+          return;
+        }
+        io.out(onOneLine`Put back the ${undone.trees.join(' and ')} tree kept in ${undone.folder}`);
+        for (const place of undone.displaced) {
+          io.out(
+            render(
+              fact(onOneLine`what stood in its place is kept at ${place}, and nothing was deleted`),
+            ),
+          );
+        }
+        io.out(
+          render(fact('that folder is deleted only by you, or after the next successful restore')),
+        );
+        return;
+      }
+      const dryRun = opts.dryRun === true;
+      const plan = planBackupRestore(here(), opts.from);
+      if (!plan.ok) {
+        reportRefusal(wiring, plan, REFUSALS);
+        return;
+      }
+      let confirmed = false;
+      if (plan.asks) {
+        const named = plan.record === undefined ? 'none: its tails are gone' : plan.record;
+        const question = [
+          onOneLine`The copy is of the record ${plan.copyRecord}, and the record this project holds is ${named}.`,
+          plan.keeping.length === 0
+            ? 'The tree holds no tail, so nothing is kept aside, and the copy is put in.'
+            : `What the ${plan.keeping.map((one) => one.tree).join(' and ')} tree holds is moved to ${plan.commonDir}/mnema/before-restore-<date>/ (inside the git directory: never committed, never in git status), and the copy is put in its place; \`mnema backup restore --undo\` puts it back.`,
+        ];
+        if (dryRun) {
+          for (const line of question) io.out(render(fact(line)));
+        } else {
+          const command =
+            opts.from === undefined
+              ? 'mnema backup restore'
+              : `mnema backup restore --from ${opts.from}`;
+          if (io.aPersonIsHere !== true || io.ask === undefined) {
+            reportRefusal(wiring, {
+              reason: 'NOT_AT_A_TERMINAL',
+              message: `${question.join(' ')} A person answers that at a terminal, and nothing here can answer for them: run \`${command}\` in a terminal. Nothing was changed.`,
+            });
+            return;
+          }
+          for (const line of question) io.out(render(fact(line, 0)));
+          const answer = (await io.ask('Type yes to restore this copy: ')).trim().toLowerCase();
+          if (answer !== 'yes') {
+            io.out('Nothing was restored.');
+            return;
+          }
+          confirmed = true;
+        }
+      }
+      const result = runBackupRestore(here(), dryRun, {
+        ...(opts.from === undefined ? {} : { from: opts.from }),
+        confirmed,
+      });
       if (!result.ok) {
         reportRefusal(wiring, result, REFUSALS);
         return;
@@ -373,7 +450,7 @@ export function registerBackup(program: Command, wiring: Wiring): Declared {
       const verb = result.dryRun ? 'would put back' : 'put back';
       const heading = result.dryRun ? 'Dry run: nothing was written. Restoring' : 'Restored';
       io.out(
-        onOneLine`${heading} record ${result.record.slice(0, 12)}... from ${result.destination}`,
+        onOneLine`${heading} record ${result.copyRecord.slice(0, 12)}... from ${result.destination}`,
       );
       for (const one of result.trees) {
         const t = one.tree;
@@ -404,6 +481,30 @@ export function registerBackup(program: Command, wiring: Wiring): Declared {
       }
       for (const tree of result.noCopy) {
         io.out(render(fact(`${tree} tree: no copy, nothing to restore`)));
+      }
+      if (result.keptAside !== undefined) {
+        io.out(
+          render(
+            fact(
+              onOneLine`what the ${result.keptAside.trees.join(' and ')} tree held is kept at ${result.keptAside.folder}`,
+            ),
+          ),
+        );
+        io.out(render(fact('`mnema backup restore --undo` puts it back')));
+        io.out(
+          render(
+            fact(
+              'that folder is deleted only by you, or after the next successful restore, which says so',
+            ),
+          ),
+        );
+      }
+      for (const folder of result.cleared) {
+        io.out(
+          render(
+            fact(onOneLine`deleted ${folder}, kept aside by an earlier restore, as it was said`),
+          ),
+        );
       }
       for (const words of WHAT_RESTORE_DOES_NOT_BRING) io.out(render(fact(words)));
       if (!result.dryRun) io.out(render(fact('`mnema backup verify` reads the result')));
