@@ -132,6 +132,7 @@ export {
   anchorPath,
   type ChainLayout,
   gitignorePath,
+  isSegmentFile,
   privateKeyPath,
   projectionCachePath,
   publicKeyPath,
@@ -203,6 +204,13 @@ export {
   recordNamedIn,
   tailsReadAt,
 } from './chain/tail-names.js';
+export {
+  type LinePutBack,
+  repairTail,
+  type TailRepaired,
+  type TailRepairInput,
+  type TailRepairRefusal,
+} from './chain/tail-repair.js';
 export { ensureTree, TAIL_MERGE_DRIVER } from './chain/tree.js';
 export {
   type BackupKeyNote,
