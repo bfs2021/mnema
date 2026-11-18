@@ -194,7 +194,9 @@ export function undoAside(
   commonDir: string,
   roots: readonly { readonly tree: BackupTree; readonly root: string }[],
 ): Undone {
-  for (const folder of asidesIn(commonDir).reverse()) {
+  const kept = asidesIn(commonDir);
+  for (let at = kept.length - 1; at >= 0; at -= 1) {
+    const folder = kept[at] as string;
     const mark = markOf(folder) as Mark;
     const mine = roots.filter(
       (one) =>
