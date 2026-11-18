@@ -315,7 +315,7 @@ describe('mnema backup verify and restore', () => {
     for (const io of [
       { ask: async () => 'yes' },
       {},
-      { aPersonIsHere: true, ask: undefined },
+      { aPersonIsHere: true },
     ] satisfies Partial<CliIo>[]) {
       const piped = await mnema(['backup', 'restore'], io);
       expect(piped.failed).toBe(true);
